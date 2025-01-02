@@ -1,0 +1,37 @@
+name: TEST
+
+on:
+  push:
+    branches:
+      - 'develop'
+      - 'feature/*'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # These permissions are needed to interact with GitHub's OIDC Token endpoint.
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read # This is required for actions/checkout
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::253056462088:role/trust_relationship
+        aws-region: us-east-2     
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 1.22
+
+    - name: Test
+      run: |
+        PKG_LIST=$(go list ./... | grep -v /vendor/ | tr '\n' ' ')
+        go test -covermode=count -coverprofile coverage $PKG_LIST
+        go tool cover -func=coverage
+        rm -rf coverage
