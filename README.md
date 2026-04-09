@@ -535,3 +535,82 @@ Crea un nuevo Logger con la configuración dada. Es compatible con firehose, aun
             AwsRegion:         "us-east-2",
         },
     })
+
+## Encryption
+
+Paquete de encriptación con soporte para RSA-OAEP y esquema híbrido RSA+AES-GCM.
+
+- **Hybrid (RSA+AES-GCM):** Para datos de cualquier tamaño. Genera una llave AES aleatoria, encripta los datos con AES-GCM y la llave con RSA-OAEP.
+- **RSA-OAEP directo:** Solo para datos pequeños (menores al tamaño de la llave RSA, ej. tokens, llaves, IDs cortos).
+
+----
+#### func EncryptHybrid(plaintext string, pubKeyStr string) (string, error)
+----
+
+### Parámetros:
+- plaintext: Texto plano a encriptar (puede ser de cualquier tamaño).
+- pubKeyStr: Llave pública RSA en base64 (formato PKIX).
+
+### Devuelve:
+- String con formato `encryptedAESKey:encryptedData` (ambos en base64).
+- Error en caso de fallo.
+
+### Descripción:
+Encripta datos usando un esquema híbrido: genera una llave AES-256 aleatoria, encripta los datos con AES-GCM y luego encripta la llave AES con RSA-OAEP SHA-256. Usar cuando los datos pueden exceder el tamaño máximo de RSA.
+
+### Ejemplo
+        encrypted, err := encryption.EncryptHybrid("datos sensibles de gran tamaño", publicKeyBase64)
+
+----
+#### func DecryptHybrid(ciphertext string, privateKey string) (string, error)
+----
+
+### Parámetros:
+- ciphertext: Texto encriptado con formato `encryptedAESKey:encryptedData`.
+- privateKey: Llave privada RSA en base64 (PKCS8 o PKCS1).
+
+### Devuelve:
+- Texto plano desencriptado.
+- Error en caso de fallo.
+
+### Descripción:
+Inversa de EncryptHybrid. Desencripta la llave AES con RSA y luego los datos con AES-GCM.
+
+### Ejemplo
+        plaintext, err := encryption.DecryptHybrid(encrypted, privateKeyBase64)
+
+----
+#### func EncryptRSAOAEP(plaintext string, pubKeyB64 string) (string, error)
+----
+
+### Parámetros:
+- plaintext: Texto plano a encriptar (debe ser menor al tamaño de la llave RSA).
+- pubKeyB64: Llave pública RSA en base64 (formato PKIX).
+
+### Devuelve:
+- Texto encriptado en base64.
+- Error en caso de fallo.
+
+### Descripción:
+Encripta directamente con RSA-OAEP SHA-256. Solo para datos pequeños (tokens, llaves, IDs cortos). Para datos mayores, usar EncryptHybrid.
+
+### Ejemplo
+        encrypted, err := encryption.EncryptRSAOAEP("token-corto", publicKeyBase64)
+
+----
+#### func DecryptRSAOAEP(ciphertext string, privateKeyB64 string) (string, error)
+----
+
+### Parámetros:
+- ciphertext: Texto encriptado en base64.
+- privateKeyB64: Llave privada RSA en base64 (PKCS8 o PKCS1).
+
+### Devuelve:
+- Texto plano desencriptado.
+- Error en caso de fallo.
+
+### Descripción:
+Desencripta directamente con RSA-OAEP SHA-256. Solo para datos que fueron encriptados con EncryptRSAOAEP.
+
+### Ejemplo
+        plaintext, err := encryption.DecryptRSAOAEP(encrypted, privateKeyBase64)
