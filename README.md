@@ -614,3 +614,90 @@ Desencripta directamente con RSA-OAEP SHA-256. Solo para datos que fueron encrip
 
 ### Ejemplo
         plaintext, err := encryption.DecryptRSAOAEP(encrypted, privateKeyBase64)
+
+## BigQuery
+
+Paquete `pkg/bigquery`. Encapsula la mecánica de acceso a Google BigQuery para que los servicios no usen el SDK `cloud.google.com/go/bigquery` directamente: provider con cliente cacheado, scan estricto de filas, paginación count + page, poda de tablas wildcard y binding de parámetros. El SQL de dominio queda en el servicio; el armado del SQL son funciones puras testeables sin red y la ejecución va aparte.
+
+----
+#### func NewProvider(projectID string, credentialsJSON string) (Provider, error)
+----
+
+### Parámetros:
+- projectID: Proyecto de GCP.
+- credentialsJSON: JSON crudo del key del service account (tal como sale de Secrets Manager). No toca disco.
+
+### Devuelve:
+- Un `Provider` con el cliente construido una sola vez y retenido. Es seguro para uso concurrente; llamar a `Close()` en el shutdown del servicio.
+
+### Descripción:
+Construye el cliente de BigQuery una única vez. Reemplaza el patrón de crear un cliente por request.
+
+### Ejemplo
+        credentialsJSON, err := bigquery.CredentialsFromSecret("dev", "gestion-aludrey", "bigquery-key", "us-east-2")
+        provider, err := bigquery.NewProvider("mi-proyecto", credentialsJSON)
+        defer provider.Close()
+
+----
+#### Provider.Read(ctx, sql string, params []Param) (Rows, error) / Provider.Count(ctx, sql string, params []Param) (int64, error)
+----
+
+### Descripción:
+`Read` ejecuta la query y devuelve las filas sin materializar (combinar con `ScanAll`). `Count` lee la primera fila de un `COUNT(*)` / `COUNT(DISTINCT x)` como `int64` y falla con `ErrNoRows` o `ErrNotScalar` si la forma no es la esperada; nunca devuelve 0 por un type assertion silencioso.
+
+----
+#### func ScanAll[T any](rows Rows) ([]T, error)
+----
+
+### Descripción:
+Materializa todas las filas en `[]T`. A diferencia del loader del SDK, que saltea en silencio las columnas sin campo destino (dejando el campo en zero value), compara el schema del resultado contra los campos mapeados de `T` (tag `bigquery:"columna"` o nombre del campo ignorando mayúsculas) y devuelve `ErrUnmappedColumn` si alguna columna del SELECT no encontró destino. Un campo de `T` sin columna en el SELECT es válido y queda en zero value.
+
+### Ejemplo
+        type invoiceRow struct {
+            Idunico      bigquery.NullString `bigquery:"idunico"`
+            FechaFactura bigquery.NullString `bigquery:"fecha_factura"`
+        }
+        rows, err := provider.Read(ctx, sql, params)
+        records, err := bigquery.ScanAll[invoiceRow](rows)
+
+----
+#### func QueryPage[T any](ctx, p Provider, countSQL, pageSQL string, filterParams, pageParams []Param, opts ...PageOption) (Page[T], error)
+----
+
+### Parámetros:
+- countSQL / pageSQL: Ambas queries ya armadas por el consumidor (ver `CountSQL`, `Paginate`).
+- filterParams: Parámetros de la cláusula de filtro; van a las dos queries.
+- pageParams: Parámetros de LIMIT/OFFSET (los que devuelve `Paginate`); van sólo a la page query.
+- opts: `bigquery.Parallel()` para correr ambas queries concurrentes.
+
+### Devuelve:
+- `Page[T]{Total, Rows}` con las filas ya escaneadas con `ScanAll`.
+
+### Descripción:
+Por default corre secuencial y, si el total es 0, **no ejecuta la page query** (BigQuery cobra los bytes leídos aunque el resultado esté vacío). Con `Parallel()` corre ambas a la vez, para casos donde el total siempre es > 0 (dashboards).
+
+### Ejemplo
+        where := bigquery.WhereClause(suffixCondition, "pais = @pais")
+        pageSQL, pageParams, err := bigquery.Paginate("SELECT ... FROM "+table+" "+where+" ORDER BY fecha_factura DESC", page, pageSize)
+        result, err := bigquery.QueryPage[invoiceRow](ctx, provider, bigquery.CountSQL(table, where), pageSQL, filterParams, pageParams)
+
+----
+#### Builders puros: WhereClause, CountSQL, Paginate, TableSuffixCondition, TableSuffix
+----
+
+### Descripción:
+- `WhereClause(conditions ...string) string`: une condiciones con AND y antepone `WHERE`; `""` si no hay ninguna.
+- `CountSQL(table, where string) string`: `SELECT COUNT(*) FROM <table> <where>`.
+- `Paginate(sql string, page, pageSize int) (string, []Param, error)`: agrega `LIMIT @pageSize OFFSET @offset` y devuelve los params. `page` es 1-based; valida `page >= 1` y `pageSize >= 1`.
+- `TableSuffixCondition(from, to time.Time) (string, bool)`: predicado `_TABLE_SUFFIX BETWEEN / >= / <=` con fechas `YYYYMMDD`. El valor va interpolado como literal a propósito (BigQuery sólo poda el wildcard con una expresión constante, con `@param` escanea todas las tablas). El literal sale únicamente de `TableSuffix`, que exige exactamente 8 dígitos; un valor inválido descarta ese bound y nunca llega al SQL.
+
+### Ejemplo
+        condition, pruned := bigquery.TableSuffixCondition(from, to)
+        // condition == "_TABLE_SUFFIX BETWEEN '20260210' AND '20260215'"
+
+----
+#### func CredentialsFromSecret(environment, appName, secretName, region string) (string, error)
+----
+
+### Descripción:
+Lee de AWS Secrets Manager (vía `pkg/secret`) el secreto con payload `{"filename": ..., "content": ...}` y devuelve `content` (el JSON del key) listo para `NewProvider`. Es una función aparte del constructor para que el servicio decida la política de fallo (p. ej. loguear y seguir arrancando).
