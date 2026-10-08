@@ -1,42 +1,44 @@
 package dynamorepository
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 
 	"github.com/aludrey/go-aludrey-libs/pkg/repository"
 )
 
-var clients = make(map[string]*dynamodb.DynamoDB)
-
-func getClient(region string) *dynamodb.DynamoDB {
-	if client, ok := clients[region]; ok {
-		return client
-	}
-	sess := session.Must(session.NewSession())
-	db := dynamodb.New(sess, aws.NewConfig().WithRegion(region))
-	clients[region] = db
-	return db
-}
-
 type DynamoRepository[T interface{}] struct {
-	db        *dynamodb.DynamoDB
+	db        dynamodbiface.DynamoDBAPI
 	tableName *string
 	keys      []string
 }
 
+var clients = make(map[string]*dynamodb.DynamoDB)
+
 func NewDynamoRepository[T interface{}](region string, tableName string, keys []string) repository.Repository[T] {
-	client := getClient(region)
+	return newDynamoRepository[T](getClient(region), tableName, keys)
+}
+
+// NewDynamoConditionalRepository es NewDynamoRepository con escrituras condicionales (CreateIf, DeleteIf).
+func NewDynamoConditionalRepository[T interface{}](region string, tableName string, keys []string) repository.ConditionalRepository[T] {
+	return newDynamoRepository[T](getClient(region), tableName, keys)
+}
+
+func newDynamoRepository[T interface{}](db dynamodbiface.DynamoDBAPI, tableName string, keys []string) *DynamoRepository[T] {
 	return &DynamoRepository[T]{
 		tableName: aws.String(tableName),
-		db:        client,
+		db:        db,
 		keys:      keys,
 	}
 }
@@ -80,18 +82,6 @@ func (r *DynamoRepository[T]) FindAll(filters map[string]([]string)) ([]T, error
 		result = append(result, item)
 	}
 	return result, nil
-}
-
-func buildKeyAttributes(id map[string]string, acceptedKeys []string) map[string]*dynamodb.AttributeValue {
-	keyAttributes := make(map[string]*dynamodb.AttributeValue)
-	for _, v := range acceptedKeys {
-		value, ok := id[v]
-		if !ok {
-			continue
-		}
-		keyAttributes[v] = &dynamodb.AttributeValue{S: aws.String(value)}
-	}
-	return keyAttributes
 }
 
 func (r *DynamoRepository[T]) FindById(id map[string]string) (*T, error) {
@@ -216,4 +206,111 @@ func (r *DynamoRepository[T]) SoftDelete(id map[string]string) error {
 		return err
 	}
 	return nil
+}
+
+// CreateIf es Create con una condición que DynamoDB evalúa de forma atómica junto con el PutItem
+// (p. ej. "attribute_not_exists(#id)" para no pisar un registro existente).
+func (r *DynamoRepository[T]) CreateIf(ctx context.Context, entity T, condition repository.Condition) (*T, error) {
+	item, err := dynamodbattribute.MarshalMap(entity)
+	if err != nil {
+		return nil, err
+	}
+	now := aws.String(time.Now().Format(time.RFC3339))
+	item["created_at"] = &dynamodb.AttributeValue{S: now}
+	item["updated_at"] = &dynamodb.AttributeValue{S: now}
+
+	names, values, err := buildConditionAttributes(condition)
+	if err != nil {
+		return nil, err
+	}
+	_, err = r.db.PutItemWithContext(ctx, &dynamodb.PutItemInput{
+		TableName:                 r.tableName,
+		Item:                      item,
+		ConditionExpression:       aws.String(condition.Expression),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: values,
+	})
+	if err != nil {
+		return nil, conditionalWriteError(err)
+	}
+	return &entity, nil
+}
+
+// DeleteIf borra el registro solo si se cumple la condición, en un único DeleteItem atómico. Sirve para
+// consumir registros de un solo uso: de dos llamadas concurrentes, una borra y la otra recibe
+// ErrConditionFailed.
+func (r *DynamoRepository[T]) DeleteIf(ctx context.Context, id map[string]string, condition repository.Condition) error {
+	names, values, err := buildConditionAttributes(condition)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.DeleteItemWithContext(ctx, &dynamodb.DeleteItemInput{
+		TableName:                 r.tableName,
+		Key:                       buildKeyAttributes(id, r.keys),
+		ConditionExpression:       aws.String(condition.Expression),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: values,
+	})
+	return conditionalWriteError(err)
+}
+
+func getClient(region string) *dynamodb.DynamoDB {
+	if client, ok := clients[region]; ok {
+		return client
+	}
+	sess := session.Must(session.NewSession())
+	db := dynamodb.New(sess, aws.NewConfig().WithRegion(region))
+	clients[region] = db
+	return db
+}
+
+func buildKeyAttributes(id map[string]string, acceptedKeys []string) map[string]*dynamodb.AttributeValue {
+	keyAttributes := make(map[string]*dynamodb.AttributeValue)
+	for _, v := range acceptedKeys {
+		value, ok := id[v]
+		if !ok {
+			continue
+		}
+		keyAttributes[v] = &dynamodb.AttributeValue{S: aws.String(value)}
+	}
+	return keyAttributes
+}
+
+// buildConditionAttributes traduce los nombres y valores de la condición al formato de DynamoDB. Una
+// condición sin expresión se rechaza: una escritura "condicional" sin condición no protege nada.
+func buildConditionAttributes(condition repository.Condition) (map[string]*string, map[string]*dynamodb.AttributeValue, error) {
+	if strings.TrimSpace(condition.Expression) == "" {
+		return nil, nil, errors.New("condition expression is required")
+	}
+	var names map[string]*string
+	if len(condition.Names) > 0 {
+		names = make(map[string]*string, len(condition.Names))
+		for placeholder, attribute := range condition.Names {
+			names[placeholder] = aws.String(attribute)
+		}
+	}
+	var values map[string]*dynamodb.AttributeValue
+	if len(condition.Values) > 0 {
+		values = make(map[string]*dynamodb.AttributeValue, len(condition.Values))
+		for placeholder, value := range condition.Values {
+			attribute, err := dynamodbattribute.Marshal(value)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid condition value %s: %w", placeholder, err)
+			}
+			values[placeholder] = attribute
+		}
+	}
+	return names, values, nil
+}
+
+// conditionalWriteError separa la condición no cumplida (ErrConditionFailed) de un fallo real.
+func conditionalWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) && awsErr.Code() == dynamodb.ErrCodeConditionalCheckFailedException {
+		return repository.ErrConditionFailed
+	}
+	return err
 }
