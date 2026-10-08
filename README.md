@@ -94,6 +94,22 @@ Retorna cantidad de mensajes y un error si la operación de recuperación falla.
         cantMsg, err := aludrey_queue.GetMessagesAvailable("http://aludrey-dev-sqs-test")
 
 
+----
+#### func GetQueueURL(queueName string) (string, error)
+----
+
+### Parámetros:
+- queueName: Nombre de la cola.
+
+### Devuelve:
+- La URL de la cola en la cuenta de las credenciales en uso, o un error si no existe o no se puede consultar.
+
+### Descripción:
+GetQueueURL resuelve la URL de una cola por su nombre, para no fijar el ID de cuenta en la configuración.
+
+### Ejemplo
+        queueURL, err := aludrey_queue.GetQueueURL("aludrey-dev-sqs-test")
+
 ## Bucket:
 
 #### DownloadFile(ctx context.Context, bucketName string, itemFile string) (*os.File, error)</b>
