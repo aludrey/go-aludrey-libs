@@ -9,14 +9,15 @@ import (
 
 func TestSendGetDeleteMessageE2E(t *testing.T) {
 	// Crear parámetros de prueba
-	queueURL := "https://sqs.us-east-2.amazonaws.com/253056462088/aludrey-dev-sqs-test"
+	queueURL, err := GetQueueURL("aludrey-dev-sqs-test")
+	assert.Nil(t, err, "Se esperaba resolver la URL de la cola de test")
 	message := "Hello, SQS!"
 	maxNumberOfMessages := int64(1)
 	visibilityTimeout := int64(3)
 	delaySeconds := int64(0)
 
 	// Ejecutar la función
-	err := SendMessage(queueURL, message, delaySeconds)
+	err = SendMessage(queueURL, message, delaySeconds)
 
 	// Verificar que no haya error
 	assert.Nil(t, err, "Se esperaba que no hubiera error")

@@ -94,6 +94,22 @@ Retorna cantidad de mensajes y un error si la operación de recuperación falla.
         cantMsg, err := aludrey_queue.GetMessagesAvailable("http://aludrey-dev-sqs-test")
 
 
+----
+#### func GetQueueURL(queueName string) (string, error)
+----
+
+### Parámetros:
+- queueName: Nombre de la cola.
+
+### Devuelve:
+- La URL de la cola en la cuenta de las credenciales en uso, o un error si no existe o no se puede consultar.
+
+### Descripción:
+GetQueueURL resuelve la URL de una cola por su nombre, para no fijar el ID de cuenta en la configuración.
+
+### Ejemplo
+        queueURL, err := aludrey_queue.GetQueueURL("aludrey-dev-sqs-test")
+
 ## Bucket:
 
 #### DownloadFile(ctx context.Context, bucketName string, itemFile string) (*os.File, error)</b>
@@ -701,3 +717,44 @@ Por default corre secuencial y, si el total es 0, **no ejecuta la page query** (
 
 ### Descripción:
 Lee de AWS Secrets Manager (vía `pkg/secret`) el secreto con payload `{"filename": ..., "content": ...}` y devuelve `content` (el JSON del key) listo para `NewProvider`. Es una función aparte del constructor para que el servicio decida la política de fallo (p. ej. loguear y seguir arrancando).
+
+## Repository (DynamoDB)
+
+#### func NewDynamoConditionalRepository[T](region string, tableName string, keys []string) repository.ConditionalRepository[T]
+----
+
+### Descripción:
+Igual que `NewDynamoRepository` (`pkg/repository/dynamo-repository-v2`), pero el repositorio devuelto suma
+escrituras condicionales. La condición se evalúa en DynamoDB junto con la escritura, de forma atómica: de dos
+llamadas concurrentes que la usan, solo una la cumple. Es lo que necesitan los registros de un solo uso (un
+nonce, un token, un lock), donde `FindById` + `Delete` deja una ventana en la que ambas pasan.
+
+Si la condición no se cumple, las dos operaciones devuelven `repository.ErrConditionFailed` (comparar con
+`errors.Is`): no es un fallo de infraestructura. Una condición sin expresión se rechaza.
+
+#### func (r *DynamoRepository[T]) CreateIf(ctx context.Context, entity T, condition repository.Condition) (*T, error)
+----
+Crea el registro (con `created_at`/`updated_at`, como `Create`) solo si se cumple la condición.
+
+#### func (r *DynamoRepository[T]) DeleteIf(ctx context.Context, id map[string]string, condition repository.Condition) error
+----
+Borra el registro solo si se cumple la condición.
+
+### Ejemplo
+        repo := dynamorepository.NewDynamoConditionalRepository[Nonce]("us-east-2", "aludrey-wallet-dev-auth-nonces", []string{"nonce"})
+
+        // Emitir sin pisar uno existente
+        _, err := repo.CreateIf(ctx, Nonce{Nonce: n, ExpiresAt: exp}, repository.Condition{
+            Expression: "attribute_not_exists(#nonce)",
+            Names:      map[string]string{"#nonce": "nonce"},
+        })
+
+        // Consumir una sola vez y solo si no venció
+        err = repo.DeleteIf(ctx, map[string]string{"nonce": n}, repository.Condition{
+            Expression: "attribute_exists(#nonce) AND #expires_at > :now",
+            Names:      map[string]string{"#nonce": "nonce", "#expires_at": "expires_at"},
+            Values:     map[string]interface{}{":now": time.Now().Unix()},
+        })
+        if errors.Is(err, repository.ErrConditionFailed) {
+            // inexistente, ya usado o vencido
+        }

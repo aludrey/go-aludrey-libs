@@ -1,6 +1,7 @@
 package s3pp
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,7 +31,7 @@ func (p *s3PersistenceProvider) createS3Client(logger log.Logger) error {
 		Region: aws.String(p.region),
 	})
 	if err != nil {
-		logger.Error("Error creating session: %v", err)
+		logger.Error(fmt.Sprintf("Error creating session: %v", err))
 		return err
 	}
 
@@ -51,7 +52,7 @@ func (p *s3PersistenceProvider) validateInit(logger log.Logger) error {
 func (p *s3PersistenceProvider) DownloadFile(logger log.Logger, bucketName string, itemFile string) (*os.File, error) {
 	err := p.validateInit(logger)
 	if err != nil {
-		logger.Error("Error validating init: %v", err)
+		logger.Error(fmt.Sprintf("Error validating init: %v", err))
 		return nil, err
 	}
 
@@ -68,7 +69,7 @@ func (p *s3PersistenceProvider) DownloadFile(logger log.Logger, bucketName strin
 	})
 
 	if err != nil {
-		logger.Error("Unable to download item %q, %v", itemFile, err)
+		logger.Error(fmt.Sprintf("Unable to download item %q, %v", itemFile, err))
 		return file, err
 	}
 
@@ -78,7 +79,7 @@ func (p *s3PersistenceProvider) DownloadFile(logger log.Logger, bucketName strin
 func (p *s3PersistenceProvider) DeleteFile(logger log.Logger, bucketName string, itemFile string) error {
 	err := p.validateInit(logger)
 	if err != nil {
-		logger.Error("Error validating init: %v", err)
+		logger.Error(fmt.Sprintf("Error validating init: %v", err))
 	}
 
 	_, err = p.s3Client.DeleteObject(&s3.DeleteObjectInput{
@@ -87,7 +88,7 @@ func (p *s3PersistenceProvider) DeleteFile(logger log.Logger, bucketName string,
 	})
 
 	if err != nil {
-		logger.Error("Unable to delete item %q, %v", itemFile, err)
+		logger.Error(fmt.Sprintf("Unable to delete item %q, %v", itemFile, err))
 		return err
 	}
 
@@ -97,14 +98,14 @@ func (p *s3PersistenceProvider) DeleteFile(logger log.Logger, bucketName string,
 func (p *s3PersistenceProvider) UploadLocalFile(logger log.Logger, bucketName string, fileKey string, localFilePath string) error {
 	err := p.validateInit(logger)
 	if err != nil {
-		logger.Error("Error validating init: %v", err)
+		logger.Error(fmt.Sprintf("Error validating init: %v", err))
 		return err
 	}
 
 	file, err := os.Open(localFilePath)
 
 	if err != nil {
-		logger.Error("Unable to open file %q, %v", localFilePath, err)
+		logger.Error(fmt.Sprintf("Unable to open file %q, %v", localFilePath, err))
 		return err
 	}
 
@@ -115,7 +116,7 @@ func (p *s3PersistenceProvider) UploadLocalFile(logger log.Logger, bucketName st
 func (p *s3PersistenceProvider) UploadStream(logger log.Logger, bucketName string, fileKey string, streamReader io.ReadSeeker) error {
 	err := p.validateInit(logger)
 	if err != nil {
-		logger.Error("Error validating init: %v", err)
+		logger.Error(fmt.Sprintf("Error validating init: %v", err))
 		return err
 	}
 
@@ -126,7 +127,7 @@ func (p *s3PersistenceProvider) UploadStream(logger log.Logger, bucketName strin
 	})
 
 	if err != nil {
-		logger.Error("Unable to upload item %q, %v", fileKey, err)
+		logger.Error(fmt.Sprintf("Unable to upload item %q, %v", fileKey, err))
 		return err
 	}
 
@@ -136,7 +137,7 @@ func (p *s3PersistenceProvider) UploadStream(logger log.Logger, bucketName strin
 func (p *s3PersistenceProvider) ListFiles(logger log.Logger, bucketName string, prefix string) ([]string, error) {
 	err := p.validateInit(logger)
 	if err != nil {
-		logger.Error("Error validating init: %v", err)
+		logger.Error(fmt.Sprintf("Error validating init: %v", err))
 		return nil, err
 	}
 
@@ -146,7 +147,7 @@ func (p *s3PersistenceProvider) ListFiles(logger log.Logger, bucketName string, 
 	})
 
 	if err != nil {
-		logger.Error("Unable to list items in bucket %q, %v", bucketName, err)
+		logger.Error(fmt.Sprintf("Unable to list items in bucket %q, %v", bucketName, err))
 		return nil, err
 	}
 
@@ -176,7 +177,7 @@ func (p *s3PersistenceProvider) MoveFile(logger log.Logger, bucketName string, i
 func (p *s3PersistenceProvider) CopyFile(logger log.Logger, souceBucketName string, sourceFileKe string, destBucketName string, destFileKey string) error {
 	err := p.validateInit(logger)
 	if err != nil {
-		logger.Error("Error validating init: %v", err)
+		logger.Error(fmt.Sprintf("Error validating init: %v", err))
 		return err
 	}
 
@@ -187,7 +188,7 @@ func (p *s3PersistenceProvider) CopyFile(logger log.Logger, souceBucketName stri
 	})
 
 	if err != nil {
-		logger.Error("Unable to copy item %q, %v", sourceFileKe, err)
+		logger.Error(fmt.Sprintf("Unable to copy item %q, %v", sourceFileKe, err))
 		return err
 	}
 

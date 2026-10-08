@@ -125,3 +125,23 @@ func GetMessages(queueURL string, maxNumberOfMessages int64, visibilityTimeout i
 
 	return result.Messages, err
 }
+
+// GetQueueURL resuelve la URL de una cola por su nombre en la cuenta de las credenciales en uso, para no
+// fijar el ID de cuenta en la configuración de quien la consume.
+func GetQueueURL(queueName string) (string, error) {
+	err := validateInit()
+	if err != nil {
+		log.Printf("Error validando la inicializacion: %v", err)
+		return "", err
+	}
+
+	result, err := sqsClient.GetQueueUrl(&sqs.GetQueueUrlInput{
+		QueueName: aws.String(queueName),
+	})
+	if err != nil {
+		log.Printf("Error obteniendo la URL de la cola %s: %v", queueName, err)
+		return "", err
+	}
+
+	return aws.StringValue(result.QueueUrl), nil
+}
