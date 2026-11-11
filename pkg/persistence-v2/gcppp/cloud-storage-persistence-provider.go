@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,11 +29,31 @@ type GCPConfig struct {
 	UniverseDomain string `json:"universe_domain"`
 }
 
+// ErrFileNotFound indica que el objeto pedido no existe en el bucket.
+var ErrFileNotFound = errors.New("gcppp: file not found")
+
+// Provider es el PersistenceProvider de Cloud Storage más las operaciones
+// que sólo ofrece esta implementación.
+type Provider interface {
+	persistence.PersistenceProvider
+	// OpenFile abre el objeto para leerlo en streaming, sin escribirlo en
+	// disco (DownloadFile lo escribe en el directorio de trabajo, lo que no
+	// sirve para lecturas concurrentes del mismo objeto). Quien llama debe
+	// cerrar el reader. Si el objeto no existe devuelve ErrFileNotFound.
+	OpenFile(ctx context.Context, bucketName string, fileKey string) (io.ReadCloser, error)
+}
+
 type gcpPersistenceProvider struct {
 	client *storage.Client
 }
 
 func NewGCPPersistenceProvider(config GCPConfig) (persistence.PersistenceProvider, error) {
+	return NewGCPProvider(config)
+}
+
+// NewGCPProvider es NewGCPPersistenceProvider con el tipo Provider, para
+// usar además OpenFile.
+func NewGCPProvider(config GCPConfig) (Provider, error) {
 	jsonConfig, err := json.Marshal(config)
 	if err != nil {
 		return nil, err
@@ -47,6 +68,17 @@ func NewGCPPersistenceProvider(config GCPConfig) (persistence.PersistenceProvide
 	return &gcpPersistenceProvider{
 		client: client,
 	}, nil
+}
+
+func (p *gcpPersistenceProvider) OpenFile(ctx context.Context, bucketName string, fileKey string) (io.ReadCloser, error) {
+	reader, err := p.client.Bucket(bucketName).Object(fileKey).NewReader(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return nil, fmt.Errorf("%w: gs://%s/%s", ErrFileNotFound, bucketName, fileKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
 }
 
 func (p *gcpPersistenceProvider) DownloadFile(bucketName string, itemFile string) (*os.File, error) {
