@@ -44,6 +44,14 @@ type provider struct {
 // de Secrets Manager — ver CredentialsFromSecret), y lo retiene. El key
 // nunca toca disco.
 func NewProvider(projectID string, credentialsJSON string) (Provider, error) {
+	p, err := newProvider(projectID, credentialsJSON)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func newProvider(projectID string, credentialsJSON string) (*provider, error) {
 	if projectID == "" {
 		return nil, ErrEmptyProjectID
 	}

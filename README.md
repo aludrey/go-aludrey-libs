@@ -718,6 +718,34 @@ Por default corre secuencial y, si el total es 0, **no ejecuta la page query** (
 ### Descripción:
 Lee de AWS Secrets Manager (vía `pkg/secret`) el secreto con payload `{"filename": ..., "content": ...}` y devuelve `content` (el JSON del key) listo para `NewProvider`. Es una función aparte del constructor para que el servicio decida la política de fallo (p. ej. loguear y seguir arrancando).
 
+----
+#### func NewClient(projectID, credentialsJSON string) (Client, error) — carga de CSV desde Cloud Storage
+----
+
+### Descripción:
+`Client` reúne `Provider` (queries) y `Loader` (cargas) con las mismas credenciales en memoria: un cliente de BigQuery y uno de Cloud Storage, construidos una vez con `context.Background()`. `Close()` libera ambos. Usar en lugar de `NewProvider` cuando el servicio además carga archivos.
+
+`Loader`:
+- `TableExists(ctx, datasetID, tableID) (bool, error)`.
+- `LoadCSVFromGCS(ctx, LoadCSVRequest) (LoadResult, error)`: lanza el job de carga **sin esperar**. BigQuery lee el objeto directo de `gs://` (el servicio no descarga el archivo). Todas las columnas son `STRING`, nombradas desde el encabezado con `ColumnNames` (caracteres inválidos → `_`, duplicados → `_2`, `_3`, ...). La tabla se crea si no existe y la carga falla si ya tiene datos (`WRITE_EMPTY`): nunca sobreescribe ni agrega. Un CSV sin encabezado falla con `ErrEmptyHeader` y uno con encabezado mal formado (comillas) con `ErrInvalidHeader`, para que el servicio distinga un archivo defectuoso de una falla de red.
+- `JobStatus(ctx, JobRef)` / `WaitJob(ctx, JobRef)`: estado actual o final (un job fallido no es error de `WaitJob`, se informa en `JobInfo.Err`). `JobInfo.ErrorDetails` trae hasta 20 errores puntuales de BigQuery (fila, columna, ubicación): `Err` suele ser un resumen genérico y el detalle para corregir el archivo está ahí.
+
+**Idempotencia**: el ID del job se deriva de bucket + objeto + *generation* del objeto + número de intento. BigQuery rechaza IDs repetidos, así que reintentar la misma versión del archivo devuelve el job existente (`LoadResult.Reused = true`) en lugar de cargar dos veces; si ese job falló, se usa el siguiente intento (hasta 5, luego `ErrLoadAttemptsExhausted`). Re-subir el archivo cambia la generation y habilita una carga nueva.
+
+### Ejemplo
+        client, err := bigquery.NewClient("mi-proyecto", credentialsJSON)
+        defer client.Close() // en el graceful shutdown
+
+        result, err := client.LoadCSVFromGCS(ctx, bigquery.LoadCSVRequest{
+            SourceURI: "gs://mi-bucket/pending/Ventas.csv",
+            DatasetID: "Imports",
+            TableID:   "Ventas",
+            Delimiter: ';',
+            Labels:    map[string]string{"run_id": runID},
+        })
+        info, err := client.WaitJob(ctx, result.Job.Ref)
+        if info.Succeeded() { /* info.OutputRows filas en info.DatasetID.info.TableID */ }
+
 ## Repository (DynamoDB)
 
 #### func NewDynamoConditionalRepository[T](region string, tableName string, keys []string) repository.ConditionalRepository[T]
