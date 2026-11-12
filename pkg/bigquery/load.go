@@ -24,6 +24,7 @@ var (
 	ErrEmptyDatasetID   = errors.New("bigquery: datasetID is required")
 	ErrEmptyTableID     = errors.New("bigquery: tableID is required")
 	ErrInvalidDelimiter = errors.New("bigquery: CSV delimiter must be a single printable character")
+	ErrInvalidEncoding  = errors.New("bigquery: CSV encoding must be UTF-8 or ISO-8859-1")
 	// ErrEmptyHeader se devuelve cuando el CSV no tiene fila de encabezado.
 	ErrEmptyHeader = errors.New("bigquery: CSV has no header row")
 	// ErrInvalidHeader se devuelve cuando la fila de encabezado no es CSV
@@ -71,7 +72,23 @@ type LoadCSVRequest struct {
 	// Location del job (ej. "US", "southamerica-east1"). Vacío deja que
 	// BigQuery la resuelva por la ubicación del dataset.
 	Location string
+	// Encoding del archivo; vacío significa UTF-8. Con UTF-8, un archivo que
+	// no lo es (p. ej. un CSV exportado por Excel en Windows-1252) suele
+	// cargarse igual pero con los acentos y la ñ alterados, sin error: para
+	// esos archivos usar EncodingISO88591.
+	Encoding Encoding
 }
+
+// Encoding es la codificación de caracteres de un CSV.
+type Encoding string
+
+const (
+	EncodingUTF8 Encoding = "UTF-8"
+	// EncodingISO88591 (Latin-1) también cubre en la práctica los CSV en
+	// Windows-1252 con texto en español: difieren sólo en símbolos poco
+	// usados (€, comillas tipográficas).
+	EncodingISO88591 Encoding = "ISO-8859-1"
+)
 
 // JobRef identifica un job de BigQuery.
 type JobRef struct {
@@ -150,6 +167,18 @@ func resolveDelimiter(delimiter rune) (rune, error) {
 	return delimiter, nil
 }
 
+// resolveEncoding valida la codificación; vacío significa UTF-8.
+func resolveEncoding(encoding Encoding) (Encoding, error) {
+	switch encoding {
+	case "":
+		return EncodingUTF8, nil
+	case EncodingUTF8, EncodingISO88591:
+		return encoding, nil
+	default:
+		return "", ErrInvalidEncoding
+	}
+}
+
 // validateLoadRequest valida el request y devuelve bucket, objeto y delimitador.
 func validateLoadRequest(req LoadCSVRequest) (bucket string, object string, delimiter rune, err error) {
 	bucket, object, err = parseGCSURI(req.SourceURI)
@@ -166,14 +195,23 @@ func validateLoadRequest(req LoadCSVRequest) (bucket string, object string, deli
 	if err != nil {
 		return "", "", 0, err
 	}
+	if _, err := resolveEncoding(req.Encoding); err != nil {
+		return "", "", 0, err
+	}
 	return bucket, object, delimiter, nil
 }
 
 // readHeaderRecord lee la primera fila del CSV (respetando comillas) y
-// descarta un BOM UTF-8 inicial. Falla con ErrEmptyHeader si no hay
-// encabezado y con ErrInvalidHeader si no es CSV válido.
-func readHeaderRecord(r io.Reader, delimiter rune) ([]string, error) {
-	reader := csv.NewReader(io.LimitReader(r, maxHeaderBytes))
+// descarta un BOM UTF-8 inicial. Un archivo ISO-8859-1 se convierte a UTF-8
+// antes de leerlo, para que los nombres de columna salgan igual que si el
+// archivo fuera UTF-8. Falla con ErrEmptyHeader si no hay encabezado y con
+// ErrInvalidHeader si no es CSV válido.
+func readHeaderRecord(r io.Reader, delimiter rune, encoding Encoding) ([]string, error) {
+	var source io.Reader = io.LimitReader(r, maxHeaderBytes)
+	if encoding == EncodingISO88591 {
+		source = &latin1Reader{source: source}
+	}
+	reader := csv.NewReader(source)
 	reader.Comma = delimiter
 	reader.FieldsPerRecord = -1
 	// Comillas estrictas, igual que BigQuery al cargar: un encabezado con
@@ -338,4 +376,27 @@ func toJobInfo(ref JobRef, state bq.State, errMsg string, details []string, stat
 		info.Labels = load.Labels
 	}
 	return info
+}
+
+// latin1Reader convierte ISO-8859-1 a UTF-8: cada byte es el code point del
+// mismo valor, así que los bytes >= 0x80 pasan a ocupar dos bytes.
+type latin1Reader struct {
+	source  io.Reader
+	pending []byte
+}
+
+func (l *latin1Reader) Read(p []byte) (int, error) {
+	if len(l.pending) == 0 {
+		raw := make([]byte, max(len(p)/2, 1))
+		n, err := l.source.Read(raw)
+		for _, b := range raw[:n] {
+			l.pending = utf8.AppendRune(l.pending, rune(b))
+		}
+		if len(l.pending) == 0 {
+			return 0, err
+		}
+	}
+	n := copy(p, l.pending)
+	l.pending = l.pending[n:]
+	return n, nil
 }
