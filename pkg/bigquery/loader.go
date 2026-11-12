@@ -95,7 +95,8 @@ func (c *client) LoadCSVFromGCS(ctx context.Context, req LoadCSVRequest) (LoadRe
 		return LoadResult{}, fmt.Errorf("bigquery: reading object attributes: %w", err)
 	}
 
-	columns, err := c.headerColumns(ctx, bucket, object, attrs.Generation, delimiter)
+	encoding, _ := resolveEncoding(req.Encoding) // ya validada
+	columns, err := c.headerColumns(ctx, bucket, object, attrs.Generation, delimiter, encoding)
 	if err != nil {
 		return LoadResult{}, err
 	}
@@ -103,7 +104,7 @@ func (c *client) LoadCSVFromGCS(ctx context.Context, req LoadCSVRequest) (LoadRe
 	for attempt := 1; attempt <= maxLoadAttempts; attempt++ {
 		ref := JobRef{ID: loadJobID(bucket, object, attrs.Generation, attempt), Location: req.Location}
 
-		job, err := c.startLoad(ctx, req, ref, columns, delimiter)
+		job, err := c.startLoad(ctx, req, ref, columns, delimiter, encoding)
 		if err == nil {
 			return LoadResult{Job: jobInfoFromJob(ref, job), Columns: columns}, nil
 		}
@@ -146,27 +147,27 @@ func (c *client) WaitJob(ctx context.Context, ref JobRef) (JobInfo, error) {
 
 // headerColumns lee el encabezado de la versión exacta del objeto y lo
 // convierte en nombres de columna.
-func (c *client) headerColumns(ctx context.Context, bucket string, object string, generation int64, delimiter rune) ([]string, error) {
+func (c *client) headerColumns(ctx context.Context, bucket string, object string, generation int64, delimiter rune, encoding Encoding) ([]string, error) {
 	reader, err := c.gcs.Bucket(bucket).Object(object).Generation(generation).NewReader(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("bigquery: opening object: %w", err)
 	}
 	defer reader.Close()
 
-	header, err := readHeaderRecord(reader, delimiter)
+	header, err := readHeaderRecord(reader, delimiter, encoding)
 	if err != nil {
 		return nil, err
 	}
 	return ColumnNames(header), nil
 }
 
-func (c *client) startLoad(ctx context.Context, req LoadCSVRequest, ref JobRef, columns []string, delimiter rune) (*bq.Job, error) {
+func (c *client) startLoad(ctx context.Context, req LoadCSVRequest, ref JobRef, columns []string, delimiter rune, encoding Encoding) (*bq.Job, error) {
 	gcsRef := bq.NewGCSReference(req.SourceURI)
 	gcsRef.SourceFormat = bq.CSV
 	gcsRef.FieldDelimiter = string(delimiter)
 	gcsRef.SkipLeadingRows = 1
 	gcsRef.AllowQuotedNewlines = true
-	gcsRef.Encoding = bq.UTF_8
+	gcsRef.Encoding = bq.Encoding(encoding)
 	gcsRef.Schema = stringSchema(columns)
 
 	loader := c.client.Dataset(req.DatasetID).Table(req.TableID).LoaderFrom(gcsRef)
