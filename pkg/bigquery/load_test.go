@@ -3,6 +3,7 @@ package bigquery
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	bq "cloud.google.com/go/bigquery"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/api/googleapi"
 )
 
@@ -83,6 +85,9 @@ func TestValidateLoadRequest(t *testing.T) {
 		{name: "no dataset", mutate: func(r *LoadCSVRequest) { r.DatasetID = "" }, expectedErr: ErrEmptyDatasetID},
 		{name: "no table", mutate: func(r *LoadCSVRequest) { r.TableID = "" }, expectedErr: ErrEmptyTableID},
 		{name: "bad delimiter", mutate: func(r *LoadCSVRequest) { r.Delimiter = '"' }, expectedErr: ErrInvalidDelimiter},
+		{name: "latin-1", mutate: func(r *LoadCSVRequest) { r.Encoding = EncodingISO88591 }},
+		{name: "explicit utf-8", mutate: func(r *LoadCSVRequest) { r.Encoding = EncodingUTF8 }},
+		{name: "bad encoding", mutate: func(r *LoadCSVRequest) { r.Encoding = "UTF-16" }, expectedErr: ErrInvalidEncoding},
 	}
 
 	for _, tc := range testCases {
@@ -122,7 +127,7 @@ func TestReadHeaderRecord(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := readHeaderRecord(strings.NewReader(tc.content), tc.delimiter)
+			got, err := readHeaderRecord(strings.NewReader(tc.content), tc.delimiter, EncodingUTF8)
 
 			assert.ErrorIs(t, err, tc.expectedErr)
 			assert.Equal(t, tc.expected, got)
@@ -142,7 +147,7 @@ func TestReadHeaderRecordRejectsMalformedHeader(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := readHeaderRecord(strings.NewReader(tc.content), ',')
+			_, err := readHeaderRecord(strings.NewReader(tc.content), ',', EncodingUTF8)
 
 			assert.ErrorIs(t, err, ErrInvalidHeader)
 		})
@@ -150,9 +155,69 @@ func TestReadHeaderRecordRejectsMalformedHeader(t *testing.T) {
 }
 
 func TestReadHeaderRecordWrapsReaderErrors(t *testing.T) {
-	_, err := readHeaderRecord(failingReader{}, ',')
+	_, err := readHeaderRecord(failingReader{}, ',', EncodingUTF8)
 
 	assert.ErrorContains(t, err, "reading CSV header")
+}
+
+func TestResolveEncoding(t *testing.T) {
+	testCases := []struct {
+		in          Encoding
+		expected    Encoding
+		expectedErr error
+	}{
+		{in: "", expected: EncodingUTF8},
+		{in: EncodingUTF8, expected: EncodingUTF8},
+		{in: EncodingISO88591, expected: EncodingISO88591},
+		{in: "latin1", expectedErr: ErrInvalidEncoding},
+		{in: "utf-8", expectedErr: ErrInvalidEncoding},
+	}
+
+	for _, tc := range testCases {
+		t.Run(string(tc.in), func(t *testing.T) {
+			got, err := resolveEncoding(tc.in)
+
+			assert.ErrorIs(t, err, tc.expectedErr)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+// A Latin-1 header is decoded before parsing: the names come out as they
+// would from the same header saved as UTF-8.
+func TestReadHeaderRecordLatin1(t *testing.T) {
+	latin1 := "A\xf1o;Descripci\xf3n;Pa\xeds\n2026;x;AR\n" // "Año;Descripción;País"
+
+	got, err := readHeaderRecord(strings.NewReader(latin1), ';', EncodingISO88591)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Año", "Descripción", "País"}, got)
+
+	utf8Header, err := readHeaderRecord(strings.NewReader("Año;Descripción;País\n"), ';', EncodingUTF8)
+	require.NoError(t, err)
+	assert.Equal(t, ColumnNames(utf8Header), ColumnNames(got))
+}
+
+// The decoder works through reads of any size, including one byte at a time.
+func TestLatin1ReaderSmallReads(t *testing.T) {
+	reader := &latin1Reader{source: strings.NewReader("\xd1and\xfa")}
+	var out []byte
+	buf := make([]byte, 1)
+	for {
+		n, err := reader.Read(buf)
+		out = append(out, buf[:n]...)
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, "Ñandú", string(out))
+}
+
+func TestLatin1ReaderPropagatesErrors(t *testing.T) {
+	_, err := readHeaderRecord(failingReader{}, ',', EncodingISO88591)
+
+	assert.ErrorContains(t, err, "boom")
 }
 
 type failingReader struct{}

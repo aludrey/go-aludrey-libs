@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	"cloud.google.com/go/storage"
 	persistence "github.com/aludrey/go-aludrey-libs/pkg/persistence-v2"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -147,18 +149,36 @@ func (p *gcpPersistenceProvider) ListFiles(bucketName string, prefix string) ([]
 	return results, nil
 }
 
+// MoveFile copia el objeto y borra el original. Si el original no existe
+// devuelve ErrFileNotFound (envolviendo el error del driver). Si la copia
+// salió bien pero al borrar el original ya no estaba (otro proceso lo movió
+// o borró en el medio), el movimiento se da por hecho: el destino existe y
+// el origen ya no.
 func (p *gcpPersistenceProvider) MoveFile(bucketName string, itemFile string, destBucketName string, destItemFile string) error {
 	err := p.CopyFile(bucketName, itemFile, destBucketName, destItemFile)
+	if isObjectNotFound(err) {
+		return fmt.Errorf("%w: gs://%s/%s: %w", ErrFileNotFound, bucketName, itemFile, err)
+	}
 	if err != nil {
 		return err
 	}
 
 	err = p.DeleteFile(bucketName, itemFile)
-	if err != nil {
+	if err != nil && !isObjectNotFound(err) {
 		return err
 	}
 
 	return nil
+}
+
+// isObjectNotFound reconoce un objeto inexistente tanto en el error tipado
+// del cliente (lecturas, borrados) como en el 404 crudo de la API (copias).
+func isObjectNotFound(err error) bool {
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return true
+	}
+	var apiErr *googleapi.Error
+	return errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound
 }
 
 func (p *gcpPersistenceProvider) CopyFile(souceBucketName string, sourceFileKe string, destBucketName string, destFileKey string) error {
