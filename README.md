@@ -662,6 +662,34 @@ Construye el cliente de BigQuery una única vez. Reemplaza el patrón de crear u
 `Read` ejecuta la query y devuelve las filas sin materializar (combinar con `ScanAll`). `Count` lee la primera fila de un `COUNT(*)` / `COUNT(DISTINCT x)` como `int64` y falla con `ErrNoRows` o `ErrNotScalar` si la forma no es la esperada; nunca devuelve 0 por un type assertion silencioso.
 
 ----
+#### Provider.Exec(ctx, sql string, params []Param) (int64, error)
+----
+
+### Parámetros:
+- sql: un statement DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`). Los valores van siempre como `@param`, nunca interpolados.
+- params: parámetros nombrados (`bigquery.P`). Para escribir un `NULL` usar el alias tipado (`bigquery.NullString{}`), nunca `nil`.
+
+### Devuelve:
+- La cantidad de filas afectadas.
+- El error del job si falló, o `ErrNotDML` si el statement no es DML.
+
+### Descripción:
+Ejecuta el statement, espera a que el job termine y lee `NumDMLAffectedRows` de las estadísticas. Con 0 filas afectadas el servicio puede distinguir "no existe" (un `UPDATE ... WHERE id = @id`) o "ya existe" (un `INSERT ... SELECT ... WHERE NOT EXISTS`) sin una lectura previa. BigQuery no tiene constraints de unicidad y dos `INSERT` concurrentes no entran en conflicto, así que el `NOT EXISTS` achica la ventana de carrera pero no la cierra. El SQL de dominio queda en el servicio.
+
+### Ejemplo
+        inserted, err := provider.Exec(ctx,
+            "INSERT INTO `proj.ds.lists` (id, code, name) "+
+                "SELECT @id, @code, @name FROM UNNEST([1]) "+
+                "WHERE NOT EXISTS (SELECT 1 FROM `proj.ds.lists` WHERE code = @code)",
+            []bigquery.Param{bigquery.P("id", id), bigquery.P("code", code), bigquery.P("name", name)})
+        // inserted == 0 → el código ya existía
+
+        updated, err := provider.Exec(ctx,
+            "UPDATE `proj.ds.lists` SET active = FALSE WHERE id = @id",
+            []bigquery.Param{bigquery.P("id", id)})
+        // updated == 0 → no existe
+
+----
 #### func ScanAll[T any](rows Rows) ([]T, error)
 ----
 

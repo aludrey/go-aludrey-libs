@@ -18,7 +18,19 @@ var (
 	// ErrNotScalar se devuelve cuando la primera fila de Count no es una
 	// única columna INT64.
 	ErrNotScalar = errors.New("bigquery: query did not return a single INT64 column")
+	// ErrNotDML se devuelve cuando Exec ejecuta algo que no es un statement
+	// DML (INSERT, UPDATE, DELETE, MERGE) o el job no informa estadísticas de
+	// query, así que no hay cantidad de filas afectadas para devolver.
+	ErrNotDML = errors.New("bigquery: statement is not DML")
 )
+
+// dmlStatementTypes son los StatementType que BigQuery informa para DML.
+var dmlStatementTypes = map[string]bool{
+	"INSERT": true,
+	"UPDATE": true,
+	"DELETE": true,
+	"MERGE":  true,
+}
 
 // Provider ejecuta queries sobre BigQuery con un cliente construido una sola
 // vez y compartido entre llamadas. Es seguro para uso concurrente.
@@ -31,6 +43,12 @@ type Provider interface {
 	// ErrNoRows si no hay fila y con ErrNotScalar si la forma no es la
 	// esperada; nunca devuelve 0 por un type assertion silencioso.
 	Count(ctx context.Context, sql string, params []Param) (int64, error)
+	// Exec ejecuta un statement DML (INSERT, UPDATE, DELETE, MERGE) con
+	// params, espera a que el job termine y devuelve la cantidad de filas
+	// afectadas. Un job fallido devuelve su error; un statement que no es DML
+	// devuelve ErrNotDML. Con 0 filas afectadas el consumidor puede
+	// distinguir "no existe" o "ya existe" sin una lectura previa.
+	Exec(ctx context.Context, sql string, params []Param) (int64, error)
 	// Close libera el cliente. Llamar en el graceful shutdown del servicio.
 	Close() error
 }
@@ -86,8 +104,47 @@ func (p *provider) Count(ctx context.Context, sql string, params []Param) (int64
 	return scalarInt64(rows)
 }
 
+func (p *provider) Exec(ctx context.Context, sql string, params []Param) (int64, error) {
+	query := p.client.Query(sql)
+	query.Parameters = toQueryParameters(params)
+
+	job, err := query.Run(ctx)
+	if err != nil {
+		return 0, err
+	}
+	// Wait devuelve nil aunque el job haya fallado: el error del job viaja en
+	// status.Err(), que affectedRows chequea.
+	status, err := job.Wait(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return affectedRows(status)
+}
+
 func (p *provider) Close() error {
 	return p.client.Close()
+}
+
+// affectedRows interpreta el estado final de un job DML. Separado de Exec
+// para poder testearlo sin red.
+func affectedRows(status *bq.JobStatus) (int64, error) {
+	if status == nil {
+		return 0, ErrNotDML
+	}
+	if err := status.Err(); err != nil {
+		return 0, err
+	}
+	if status.Statistics == nil {
+		return 0, ErrNotDML
+	}
+	stats, ok := status.Statistics.Details.(*bq.QueryStatistics)
+	if !ok || stats == nil {
+		return 0, ErrNotDML
+	}
+	if !dmlStatementTypes[stats.StatementType] {
+		return 0, fmt.Errorf("%w: got %q", ErrNotDML, stats.StatementType)
+	}
+	return stats.NumDMLAffectedRows, nil
 }
 
 // scalarInt64 lee la primera fila de rows y la interpreta como un único
