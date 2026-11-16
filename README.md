@@ -662,6 +662,52 @@ Construye el cliente de BigQuery una única vez. Reemplaza el patrón de crear u
 `Read` ejecuta la query y devuelve las filas sin materializar (combinar con `ScanAll`). `Count` lee la primera fila de un `COUNT(*)` / `COUNT(DISTINCT x)` como `int64` y falla con `ErrNoRows` o `ErrNotScalar` si la forma no es la esperada; nunca devuelve 0 por un type assertion silencioso.
 
 ----
+#### Provider.Exec(ctx, sql string, params []Param) (int64, error)
+----
+
+### Parámetros:
+- sql: un statement DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`). Los valores van siempre como `@param`, nunca interpolados.
+- params: parámetros nombrados (`bigquery.P`). Para escribir un `NULL` usar el alias tipado (`bigquery.NullString{}`), nunca `nil`.
+
+### Devuelve:
+- La cantidad de filas afectadas.
+- El error del job si falló, o `ErrNotDML` si el statement no es DML.
+
+### Descripción:
+Ejecuta el statement, espera a que el job termine y lee `NumDMLAffectedRows` de las estadísticas. Con 0 filas afectadas el servicio puede distinguir "no existe" (un `UPDATE ... WHERE id = @id`) sin una lectura previa. El SQL de dominio queda en el servicio.
+
+### Ejemplo
+        updated, err := provider.Exec(ctx,
+            "UPDATE `proj.ds.table` SET active = FALSE WHERE id = @id",
+            []bigquery.Param{bigquery.P("id", id)})
+        // updated == 0 → no existe
+
+----
+#### Provider.Insert(ctx, table string, values []Param) (InsertResult, error)
+----
+
+### Parámetros:
+- table: referencia completa de la tabla, con backticks.
+- values: una columna por `Param`; el nombre del `Param` es el nombre de la columna. Se interpola tal cual en el SQL: tiene que salir del código, nunca de input externo.
+
+### Devuelve:
+- `InsertResult{CreatedAt, CreatedBy}`: los valores de auditoría (`CreatedBy` vacío = `NULL`).
+- `ErrNoInsertValues`, o el error del job.
+
+### Descripción:
+Inserta una fila. Si `values` incluye `created_at` y/o `created_by`, el valor que trae se ignora y la lib pone el suyo: `created_at` = hora UTC (en microsegundos, como la guarda un `TIMESTAMP`), `created_by` = el usuario cargado con `bigquery.WithCreatedBy(ctx, user)`, `NULL` si no hay. Las tablas sin esas columnas simplemente no las incluyen. `bigquery.CreatedByFrom(ctx)` lee el usuario del context (por ejemplo desde un fake de `Provider`).
+
+### Ejemplo
+        ctx = bigquery.WithCreatedBy(ctx, user)
+        audit, err := provider.Insert(ctx, "`proj.ds.table`", []bigquery.Param{
+            bigquery.P("id", id),
+            bigquery.P("name", name),
+            bigquery.P(bigquery.CreatedAtColumn, nil),
+            bigquery.P(bigquery.CreatedByColumn, nil),
+        })
+        // audit.CreatedAt / audit.CreatedBy → lo que quedó guardado
+
+----
 #### func ScanAll[T any](rows Rows) ([]T, error)
 ----
 

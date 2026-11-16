@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 
+	bq "cloud.google.com/go/bigquery"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -146,4 +148,71 @@ func (f *fakeProvider) Count(_ context.Context, sql string, params []Param) (int
 	return scalarInt64(f.countRows)
 }
 
+func (f *fakeProvider) Exec(_ context.Context, sql string, params []Param) (int64, error) {
+	f.record(sql, params)
+	return 0, nil
+}
+
+func (f *fakeProvider) Insert(_ context.Context, table string, values []Param) (InsertResult, error) {
+	f.record(table, values)
+	return InsertResult{}, nil
+}
+
 func (f *fakeProvider) Close() error { return nil }
+
+func TestAffectedRows(t *testing.T) {
+	dml := func(statementType string, affected int64) *bq.JobStatus {
+		return &bq.JobStatus{
+			State: bq.Done,
+			Statistics: &bq.JobStatistics{
+				Details: &bq.QueryStatistics{StatementType: statementType, NumDMLAffectedRows: affected},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name        string
+		status      *bq.JobStatus
+		expected    int64
+		expectedErr error
+	}{
+		{name: "insert affected rows", status: dml("INSERT", 1), expected: 1},
+		{name: "update affected several rows", status: dml("UPDATE", 3), expected: 3},
+		{name: "delete affected rows", status: dml("DELETE", 2), expected: 2},
+		{name: "merge affected rows", status: dml("MERGE", 4), expected: 4},
+		{name: "zero affected rows is not an error", status: dml("UPDATE", 0), expected: 0},
+		{name: "select is not DML", status: dml("SELECT", 0), expectedErr: ErrNotDML},
+		{name: "nil status", status: nil, expectedErr: ErrNotDML},
+		{name: "missing statistics", status: &bq.JobStatus{State: bq.Done}, expectedErr: ErrNotDML},
+		{
+			name: "non query statistics",
+			status: &bq.JobStatus{
+				State:      bq.Done,
+				Statistics: &bq.JobStatistics{Details: &bq.LoadStatistics{}},
+			},
+			expectedErr: ErrNotDML,
+		},
+		{
+			name: "nil query statistics",
+			status: &bq.JobStatus{
+				State:      bq.Done,
+				Statistics: &bq.JobStatistics{Details: (*bq.QueryStatistics)(nil)},
+			},
+			expectedErr: ErrNotDML,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := affectedRows(tc.status)
+
+			if tc.expectedErr != nil {
+				assert.ErrorIs(t, err, tc.expectedErr)
+				assert.Zero(t, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
