@@ -674,20 +674,38 @@ Construye el cliente de BigQuery una única vez. Reemplaza el patrón de crear u
 - El error del job si falló, o `ErrNotDML` si el statement no es DML.
 
 ### Descripción:
-Ejecuta el statement, espera a que el job termine y lee `NumDMLAffectedRows` de las estadísticas. Con 0 filas afectadas el servicio puede distinguir "no existe" (un `UPDATE ... WHERE id = @id`) o "ya existe" (un `INSERT ... SELECT ... WHERE NOT EXISTS`) sin una lectura previa. BigQuery no tiene constraints de unicidad y dos `INSERT` concurrentes no entran en conflicto, así que el `NOT EXISTS` achica la ventana de carrera pero no la cierra. El SQL de dominio queda en el servicio.
+Ejecuta el statement, espera a que el job termine y lee `NumDMLAffectedRows` de las estadísticas. Con 0 filas afectadas el servicio puede distinguir "no existe" (un `UPDATE ... WHERE id = @id`) sin una lectura previa. El SQL de dominio queda en el servicio.
 
 ### Ejemplo
-        inserted, err := provider.Exec(ctx,
-            "INSERT INTO `proj.ds.lists` (id, code, name) "+
-                "SELECT @id, @code, @name FROM UNNEST([1]) "+
-                "WHERE NOT EXISTS (SELECT 1 FROM `proj.ds.lists` WHERE code = @code)",
-            []bigquery.Param{bigquery.P("id", id), bigquery.P("code", code), bigquery.P("name", name)})
-        // inserted == 0 → el código ya existía
-
         updated, err := provider.Exec(ctx,
-            "UPDATE `proj.ds.lists` SET active = FALSE WHERE id = @id",
+            "UPDATE `proj.ds.table` SET active = FALSE WHERE id = @id",
             []bigquery.Param{bigquery.P("id", id)})
         // updated == 0 → no existe
+
+----
+#### Provider.Insert(ctx, table string, values []Param) (InsertResult, error)
+----
+
+### Parámetros:
+- table: referencia completa de la tabla, con backticks.
+- values: una columna por `Param`; el nombre del `Param` es el nombre de la columna. Se interpola tal cual en el SQL: tiene que salir del código, nunca de input externo.
+
+### Devuelve:
+- `InsertResult{CreatedAt, CreatedBy}`: los valores de auditoría (`CreatedBy` vacío = `NULL`).
+- `ErrNoInsertValues`, o el error del job.
+
+### Descripción:
+Inserta una fila. Si `values` incluye `created_at` y/o `created_by`, el valor que trae se ignora y la lib pone el suyo: `created_at` = hora UTC (en microsegundos, como la guarda un `TIMESTAMP`), `created_by` = el usuario cargado con `bigquery.WithCreatedBy(ctx, user)`, `NULL` si no hay. Las tablas sin esas columnas simplemente no las incluyen. `bigquery.CreatedByFrom(ctx)` lee el usuario del context (por ejemplo desde un fake de `Provider`).
+
+### Ejemplo
+        ctx = bigquery.WithCreatedBy(ctx, user)
+        audit, err := provider.Insert(ctx, "`proj.ds.table`", []bigquery.Param{
+            bigquery.P("id", id),
+            bigquery.P("name", name),
+            bigquery.P(bigquery.CreatedAtColumn, nil),
+            bigquery.P(bigquery.CreatedByColumn, nil),
+        })
+        // audit.CreatedAt / audit.CreatedBy → lo que quedó guardado
 
 ----
 #### func ScanAll[T any](rows Rows) ([]T, error)

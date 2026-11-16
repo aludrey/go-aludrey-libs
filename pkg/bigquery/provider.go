@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	bq "cloud.google.com/go/bigquery"
 	"google.golang.org/api/iterator"
@@ -49,12 +50,19 @@ type Provider interface {
 	// devuelve ErrNotDML. Con 0 filas afectadas el consumidor puede
 	// distinguir "no existe" o "ya existe" sin una lectura previa.
 	Exec(ctx context.Context, sql string, params []Param) (int64, error)
+	// Insert inserta una fila en table (referencia completa, con backticks),
+	// una columna por Param de values. Si values incluye created_at y/o
+	// created_by, la lib pone su valor: la hora UTC y el usuario de
+	// WithCreatedBy (NULL si no hay). Devuelve esos valores.
+	Insert(ctx context.Context, table string, values []Param) (InsertResult, error)
 	// Close libera el cliente. Llamar en el graceful shutdown del servicio.
 	Close() error
 }
 
 type provider struct {
 	client *bq.Client
+	// now es el reloj de created_at.
+	now func() time.Time
 }
 
 // NewProvider construye el cliente una única vez, con context.Background() y
@@ -82,7 +90,7 @@ func newProvider(projectID string, credentialsJSON string) (*provider, error) {
 		return nil, fmt.Errorf("bigquery: creating client: %w", err)
 	}
 
-	return &provider{client: client}, nil
+	return &provider{client: client, now: time.Now}, nil
 }
 
 func (p *provider) Read(ctx context.Context, sql string, params []Param) (Rows, error) {
@@ -105,6 +113,27 @@ func (p *provider) Count(ctx context.Context, sql string, params []Param) (int64
 }
 
 func (p *provider) Exec(ctx context.Context, sql string, params []Param) (int64, error) {
+	return p.runDML(ctx, sql, params)
+}
+
+func (p *provider) Insert(ctx context.Context, table string, values []Param) (InsertResult, error) {
+	result := InsertResult{
+		CreatedAt: p.now().UTC().Truncate(time.Microsecond),
+		CreatedBy: CreatedByFrom(ctx),
+	}
+	sql, params, err := buildInsert(table, values, result)
+	if err != nil {
+		return InsertResult{}, err
+	}
+	if _, err := p.runDML(ctx, sql, params); err != nil {
+		return InsertResult{}, err
+	}
+	return result, nil
+}
+
+// runDML ejecuta un statement DML, espera el job y devuelve las filas
+// afectadas.
+func (p *provider) runDML(ctx context.Context, sql string, params []Param) (int64, error) {
 	query := p.client.Query(sql)
 	query.Parameters = toQueryParameters(params)
 

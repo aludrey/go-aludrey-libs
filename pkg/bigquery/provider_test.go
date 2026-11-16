@@ -153,6 +153,11 @@ func (f *fakeProvider) Exec(_ context.Context, sql string, params []Param) (int6
 	return 0, nil
 }
 
+func (f *fakeProvider) Insert(_ context.Context, table string, values []Param) (InsertResult, error) {
+	f.record(table, values)
+	return InsertResult{}, nil
+}
+
 func (f *fakeProvider) Close() error { return nil }
 
 func TestAffectedRows(t *testing.T) {
