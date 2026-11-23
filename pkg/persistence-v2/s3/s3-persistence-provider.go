@@ -1,12 +1,18 @@
-package s3pp
+package s3
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	persistence "github.com/aludrey/go-aludrey-libs/pkg/persistence-v2"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
@@ -125,27 +131,115 @@ func (p *s3PersistenceProvider) UploadStream(bucketName string, fileKey string, 
 }
 
 func (p *s3PersistenceProvider) ListFiles(bucketName string, prefix string) ([]string, error) {
-	err := p.validateInit()
-	if err != nil {
-		return nil, err
-	}
-
-	objects, err := p.s3Client.ListObjects(&s3.ListObjectsInput{
-		Bucket: aws.String(bucketName),
-		Prefix: aws.String(prefix),
-	})
-
+	objects, err := p.ListObjects(bucketName, prefix)
 	if err != nil {
 		return nil, err
 	}
 
 	var aux []string
 
-	for _, item := range objects.Contents {
-		aux = append(aux, *item.Key)
+	for _, item := range objects {
+		aux = append(aux, item.Key)
 	}
 
 	return aux, nil
+}
+
+func (p *s3PersistenceProvider) ListObjects(bucketName string, prefix string) ([]persistence.ObjectInfo, error) {
+	if err := persistence.ValidateRepoName(bucketName); err != nil {
+		return nil, err
+	}
+
+	err := p.validateInit()
+	if err != nil {
+		return nil, err
+	}
+
+	objects := make([]persistence.ObjectInfo, 0)
+	err = p.s3Client.ListObjectsV2PagesWithContext(context.Background(), &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(prefix),
+	}, func(page *s3.ListObjectsV2Output, _ bool) bool {
+		for _, item := range page.Contents {
+			objects = append(objects, persistence.ObjectInfo{
+				Key:          aws.StringValue(item.Key),
+				Size:         aws.Int64Value(item.Size),
+				LastModified: aws.TimeValue(item.LastModified),
+				// S3 devuelve el ETag entre comillas; Cloud Storage no.
+				ETag: strings.Trim(aws.StringValue(item.ETag), `"`),
+			})
+		}
+		return true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing s3://%s/%s: %w", bucketName, prefix, err)
+	}
+
+	return objects, nil
+}
+
+func (p *s3PersistenceProvider) ReadFile(bucketName string, itemFile string, maxBytes int64) ([]byte, error) {
+	if err := persistence.ValidateReadFile(bucketName, itemFile, maxBytes); err != nil {
+		return nil, err
+	}
+
+	err := p.validateInit()
+	if err != nil {
+		return nil, err
+	}
+
+	location := "s3://" + bucketName + "/" + itemFile
+	output, err := p.s3Client.GetObjectWithContext(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(itemFile),
+	})
+	if isS3NotFound(err) {
+		return nil, fmt.Errorf("%w: %s: %w", persistence.ErrObjectNotFound, location, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting %s: %w", location, err)
+	}
+
+	return persistence.ReadAllLimited(output.Body, location, maxBytes)
+}
+
+// Con credenciales temporales (rol, SSO) la URL deja de funcionar cuando
+// éstas expiran, aunque no se haya cumplido ttl.
+func (p *s3PersistenceProvider) PresignDownloadURL(bucketName string, itemFile string, ttl time.Duration) (string, time.Time, error) {
+	if err := persistence.ValidatePresign(bucketName, itemFile, ttl); err != nil {
+		return "", time.Time{}, err
+	}
+
+	err := p.validateInit()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	req, _ := p.s3Client.GetObjectRequest(&s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(itemFile),
+	})
+
+	url, err := req.Presign(ttl)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("presigning s3://%s/%s: %w", bucketName, itemFile, err)
+	}
+
+	expiresAt, err := persistence.SignedURLExpiry(url, "X-Amz-Date", "X-Amz-Expires")
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("presigning s3://%s/%s: %w", bucketName, itemFile, err)
+	}
+
+	return url, expiresAt, nil
+}
+
+// GetObject responde NoSuchKey; las operaciones sin cuerpo (HeadObject), NotFound.
+func isS3NotFound(err error) bool {
+	var awsErr awserr.Error
+	if !errors.As(err, &awsErr) {
+		return false
+	}
+	return awsErr.Code() == s3.ErrCodeNoSuchKey || awsErr.Code() == "NotFound"
 }
 
 func (p *s3PersistenceProvider) MoveFile(bucketName string, itemFile string, destBucketName string, destItemFile string) error {
