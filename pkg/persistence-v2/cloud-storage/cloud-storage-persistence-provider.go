@@ -1,4 +1,4 @@
-package gcppp
+package cloudstorage
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"cloud.google.com/go/storage"
 	persistence "github.com/aludrey/go-aludrey-libs/pkg/persistence-v2"
@@ -32,7 +33,7 @@ type GCPConfig struct {
 }
 
 // ErrFileNotFound indica que el objeto pedido no existe en el bucket.
-var ErrFileNotFound = errors.New("gcppp: file not found")
+var ErrFileNotFound = errors.New("cloudstorage: file not found")
 
 // Provider es el PersistenceProvider de Cloud Storage más las operaciones
 // que sólo ofrece esta implementación.
@@ -131,22 +132,86 @@ func (p *gcpPersistenceProvider) UploadStream(bucketName string, fileKey string,
 }
 
 func (p *gcpPersistenceProvider) ListFiles(bucketName string, prefix string) ([]string, error) {
-	objects := p.client.Bucket(bucketName).Objects(context.Background(), &storage.Query{
-		Prefix: prefix,
-	})
-	if objects == nil {
-		return nil, errors.New("no objects found")
-	}
-	next, err := objects.Next()
-	results := make([]string, 0)
-	for err == nil && next != nil {
-		results = append(results, next.Name)
-		next, err = objects.Next()
-	}
-	if err != iterator.Done {
+	objects, err := p.ListObjects(bucketName, prefix)
+	if err != nil {
 		return nil, err
 	}
+	results := make([]string, 0, len(objects))
+	for _, object := range objects {
+		results = append(results, object.Key)
+	}
 	return results, nil
+}
+
+func (p *gcpPersistenceProvider) ListObjects(bucketName string, prefix string) ([]persistence.ObjectInfo, error) {
+	if err := persistence.ValidateRepoName(bucketName); err != nil {
+		return nil, err
+	}
+
+	query := &storage.Query{Prefix: prefix}
+	if err := query.SetAttrSelection([]string{"Name", "Size", "Updated", "Etag"}); err != nil {
+		return nil, fmt.Errorf("listing gs://%s/%s: %w", bucketName, prefix, err)
+	}
+
+	it := p.client.Bucket(bucketName).Objects(context.Background(), query)
+	objects := make([]persistence.ObjectInfo, 0)
+	for {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return objects, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("listing gs://%s/%s: %w", bucketName, prefix, err)
+		}
+		objects = append(objects, persistence.ObjectInfo{
+			Key:          attrs.Name,
+			Size:         attrs.Size,
+			LastModified: attrs.Updated,
+			ETag:         attrs.Etag,
+		})
+	}
+}
+
+func (p *gcpPersistenceProvider) ReadFile(bucketName string, itemFile string, maxBytes int64) ([]byte, error) {
+	if err := persistence.ValidateReadFile(bucketName, itemFile, maxBytes); err != nil {
+		return nil, err
+	}
+
+	location := "gs://" + bucketName + "/" + itemFile
+	reader, err := p.client.Bucket(bucketName).Object(itemFile).NewReader(context.Background())
+	if isObjectNotFound(err) {
+		return nil, fmt.Errorf("%w: %s: %w", persistence.ErrObjectNotFound, location, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", location, err)
+	}
+
+	return persistence.ReadAllLimited(reader, location, maxBytes)
+}
+
+// Firma con la clave privada de la cuenta de servicio del provider. El
+// cliente trunca la validez a segundos enteros: la URL puede durar hasta un
+// segundo menos que ttl.
+func (p *gcpPersistenceProvider) PresignDownloadURL(bucketName string, itemFile string, ttl time.Duration) (string, time.Time, error) {
+	if err := persistence.ValidatePresign(bucketName, itemFile, ttl); err != nil {
+		return "", time.Time{}, err
+	}
+
+	url, err := p.client.Bucket(bucketName).SignedURL(itemFile, &storage.SignedURLOptions{
+		Scheme:  storage.SigningSchemeV4,
+		Method:  http.MethodGet,
+		Expires: time.Now().Add(ttl),
+	})
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("signing gs://%s/%s: %w", bucketName, itemFile, err)
+	}
+
+	expiresAt, err := persistence.SignedURLExpiry(url, "X-Goog-Date", "X-Goog-Expires")
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("signing gs://%s/%s: %w", bucketName, itemFile, err)
+	}
+
+	return url, expiresAt, nil
 }
 
 // MoveFile copia el objeto y borra el original. Si el original no existe
