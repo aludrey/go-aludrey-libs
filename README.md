@@ -238,6 +238,81 @@ Mueve del bucket <i>bucketName</i> el contenido del archivo <i>itemFile</i> al b
 
 Mueve el archivo <i>test.txt</i> del bucket <i>ejemplo-s3</i> al archivo <i>text.txt</i> en el bucket <i>ejemplo-s3-destino</i>
 
+## Persistence v2 (S3 y Cloud Storage)
+
+`pkg/persistence-v2` expone la interfaz `persistencev2.PersistenceProvider`, implementada para S3 en `pkg/persistence-v2/s3` (`s3.NewS3PersistenceProvider(region)`) y para Cloud Storage en `pkg/persistence-v2/cloud-storage` (`cloudstorage.NewGCPPersistenceProvider(config)`). Además de `DownloadFile`, `DeleteFile`, `UploadLocalFile`, `UploadStream`, `ListFiles`, `MoveFile` y `CopyFile`, incluye los métodos descritos abajo.
+
+Errores comunes (comparar con `errors.Is`):
+- `persistencev2.ErrObjectNotFound`: el objeto no existe.
+- `persistencev2.ErrObjectTooLarge`: el objeto supera el máximo pedido en `ReadFile`.
+- `persistencev2.ErrInvalidArgument`: un parámetro es inválido (bucket o clave vacíos, `maxBytes <= 0`, `ttl` fuera de rango). La operación no llega al proveedor.
+
+**Paginación**: `ListObjects` y `ListFiles` recorren todas las páginas del listado (S3 devuelve como mucho 1000 objetos por página), así que devuelven todos los objetos bajo el prefijo. Un bucket vacío o un prefijo sin objetos devuelven una lista vacía, no un error.
+
+----
+#### ListObjects(repoName string, prefix string) ([]persistencev2.ObjectInfo, error)
+----
+
+### Parámetros:
+- repoName: Nombre del bucket
+- prefix: Prefijo de las claves a listar (`""` lista todo el bucket)
+
+### Devuelve:
+- Lista de `ObjectInfo` con `Key`, `Size` (bytes), `LastModified` y `ETag` (sin comillas en ambos proveedores)
+- Error en caso de no poder completar el listado
+
+### Ejemplo
+        objects, err := provider.ListObjects("releases-bucket", "desktop/stable/")
+        for _, object := range objects {
+            fmt.Println(object.Key, object.Size, object.LastModified, object.ETag)
+        }
+
+----
+#### ReadFile(repoName string, filePath string, maxBytes int64) ([]byte, error)
+----
+
+### Parámetros:
+- repoName: Nombre del bucket
+- filePath: Clave del objeto
+- maxBytes: Tamaño máximo aceptado, mayor que 0
+
+### Devuelve:
+- Los bytes exactos del objeto
+- `ErrObjectNotFound` si no existe, `ErrObjectTooLarge` si ocupa más de `maxBytes`, o el error de lectura o de cierre
+
+### Descripción:
+Lee el objeto completo en memoria, sin escribir en disco (a diferencia de `DownloadFile`, que crea el archivo en el directorio de trabajo). Sirve para archivos pequeños como firmas o manifiestos. Nunca lee más de `maxBytes + 1` bytes.
+
+### Ejemplo
+        signature, err := provider.ReadFile("releases-bucket", "desktop/stable/app.sig", 64*1024)
+        if errors.Is(err, persistencev2.ErrObjectNotFound) {
+            // no hay firma publicada
+        }
+
+----
+#### PresignDownloadURL(repoName string, filePath string, ttl time.Duration) (string, time.Time, error)
+----
+
+### Parámetros:
+- repoName: Nombre del bucket
+- filePath: Clave del objeto
+- ttl: Validez de la URL. Debe ser mayor que 0 y como mucho `persistencev2.MaxPresignTTL` (7 días)
+
+### Devuelve:
+- URL `GET` que permite descargar el objeto sin credenciales, también desde un bucket privado
+- Instante en que la URL expira, leído de la propia URL firmada
+- Error en caso de no poder firmar
+
+### Descripción:
+En S3 firma con SigV4 usando las credenciales del proceso. En Cloud Storage firma con V4 usando la clave privada de la cuenta de servicio del provider. Al expirar, la URL responde `403`. Firmar no comprueba que el objeto exista: si no existe, la URL responde `404` al usarla.
+
+**Credenciales temporales (S3)**: si el proceso usa credenciales temporales (rol de ECS/Lambda, SSO, `AssumeRole`), la URL deja de funcionar cuando expiran esas credenciales, aunque no se haya cumplido el `ttl`. Para URLs de larga duración, usa credenciales cuya vida supere el `ttl`.
+
+**Cloud Storage**: la validez se expresa en segundos enteros y el cliente la trunca, así que la URL puede durar hasta un segundo menos que `ttl`. El instante devuelto es el real.
+
+### Ejemplo
+        url, expiresAt, err := provider.PresignDownloadURL("releases-bucket", "desktop/stable/app.dmg", 15*time.Minute)
+
 ## Parameter:
 
 #### func LoadParameters(evironment string, appName string) error

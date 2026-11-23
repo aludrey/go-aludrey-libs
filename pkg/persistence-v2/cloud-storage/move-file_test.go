@@ -1,4 +1,4 @@
-package gcppp
+package cloudstorage
 
 import (
 	"context"
